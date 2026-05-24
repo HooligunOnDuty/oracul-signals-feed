@@ -1,22 +1,77 @@
-import type { AgentDashboardPayload, PublicFeed } from "./feedTypes";
+import type { AgentDashboardPayload, PublicFeed, PublicSignalRow } from "./feedTypes";
+
+function baseDecisionId(id: string): string {
+  return id.split("#")[0] ?? id;
+}
+
+function mergeStatus(statuses: string[]): string {
+  if (statuses.length === 0) return "unknown";
+  if (statuses.every((s) => s === "unfilled")) return "unfilled";
+  if (statuses.some((s) => s === "open" || s === "partial")) return "partial";
+  if (statuses.every((s) => s === "win")) return "win";
+  if (statuses.every((s) => s === "loss")) return "loss";
+  if (statuses.some((s) => s === "win")) return "mixed";
+  if (statuses.some((s) => s === "loss")) return "mixed";
+  return statuses[0] ?? "unknown";
+}
+
+/** Collapse per-account dashboard rows into one public signal per Oracul decision. */
+function mergeDecisionRows(
+  raw: NonNullable<AgentDashboardPayload["decisions"]>,
+): PublicSignalRow[] {
+  const groups = new Map<string, NonNullable<AgentDashboardPayload["decisions"]>>();
+
+  for (const row of raw) {
+    const key = baseDecisionId(row.id);
+    const list = groups.get(key) ?? [];
+    list.push(row);
+    groups.set(key, list);
+  }
+
+  const merged: PublicSignalRow[] = [];
+
+  for (const [baseId, rows] of groups) {
+    const head = rows[0]!;
+    const statuses = rows.map((r) => r.paperStatus ?? "unknown");
+    const stakeSum = rows.reduce((s, r) => s + (r.paperStakeUsd ?? 0), 0);
+    const pnlValues = rows
+      .map((r) => r.paperPnlUsd)
+      .filter((v): v is number => v != null && !Number.isNaN(v));
+    const pnlSum =
+      pnlValues.length > 0
+        ? pnlValues.reduce((s, v) => s + v, 0)
+        : null;
+
+    merged.push({
+      id: baseId,
+      roundNumber: head.roundNumber,
+      roundBettingStartsAt: head.roundBettingStartsAt ?? null,
+      roundEndsAt: head.roundEndsAt ?? null,
+      direction: head.direction,
+      signalStrength: head.signalStrength ?? "unknown",
+      confidence: head.confidence ?? null,
+      paperStatus: mergeStatus(statuses),
+      paperStakeUsd: stakeSum > 0 ? stakeSum : null,
+      paperEntryPrice: head.paperEntryPrice ?? null,
+      paperQuotePrice: head.paperQuotePrice ?? null,
+      paperPnlUsd: pnlSum,
+      paperPayoutUsd: null,
+      decidedAt: head.decidedAt,
+      entryMode: head.entryMode ?? null,
+      simAccounts: rows.length,
+    });
+  }
+
+  merged.sort(
+    (a, b) => new Date(b.decidedAt).getTime() - new Date(a.decidedAt).getTime(),
+  );
+
+  return merged;
+}
 
 /** Strip bankroll / live wallet details — friend-safe public feed. */
 export function sanitizeAgentPayload(raw: AgentDashboardPayload): PublicFeed {
-  const decisions = (raw.decisions ?? []).map((d) => ({
-    id: d.id,
-    roundNumber: d.roundNumber,
-    direction: d.direction,
-    signalStrength: d.signalStrength ?? "unknown",
-    confidence: d.confidence ?? null,
-    paperStatus: d.paperStatus ?? null,
-    paperStakeUsd: d.paperStakeUsd ?? null,
-    paperEntryPrice: d.paperEntryPrice ?? null,
-    paperQuotePrice: d.paperQuotePrice ?? null,
-    paperPnlUsd: d.paperPnlUsd ?? null,
-    paperPayoutUsd: d.paperPayoutUsd ?? null,
-    decidedAt: d.decidedAt,
-    entryMode: d.entryMode ?? null,
-  }));
+  const decisions = mergeDecisionRows(raw.decisions ?? []);
 
   return {
     updatedAt: new Date().toISOString(),
